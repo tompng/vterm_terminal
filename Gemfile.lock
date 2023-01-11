@@ -1,0 +1,13 @@
+GEM
+  remote: https://rubygems.org/
+  specs:
+    vterm (0.0.5)
+
+PLATFORMS
+  x86_64-darwin-20
+
+DEPENDENCIES
+  vterm
+
+BUNDLED WITH
+   2.4.0.dev
