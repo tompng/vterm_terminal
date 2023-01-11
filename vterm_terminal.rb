@@ -20,17 +20,20 @@ class VTermTerminal
     clear_screen_cache
   end
 
-  COLORS = { 0 => 0, 0xf0f0f0 => 7 }
-  def font_color(color)
-    return color.index if color.is_a? VTerm::ColorIndexed
-    COLORS[(color.red << 16) | (color.green << 8) | color.blue]
-  rescue
-    puts "Unimplemented color: #{color}"
-    exit
+  COLOR_ELEMENT_TABLE = [0, 95, 135, 175, 215, 255]
+  COLOR_VALUE_INDEX = 256.times.map do |value|
+    (0..5).min_by { (COLOR_ELEMENT_TABLE[_1] - value).abs }
+  end
+  def font_color(color, base)
+    return base + color.index if color.is_a? VTerm::ColorIndexed
+    r = COLOR_VALUE_INDEX[color.red]
+    g = COLOR_VALUE_INDEX[color.green]
+    b = COLOR_VALUE_INDEX[color.blue]
+    [base + 8, 5, r * 36 + g * 6 + b + 16]
   end
 
   def font_style(cell)
-    font = [30 + font_color(cell.fg), 40 + font_color(cell.bg)]
+    font = [font_color(cell.fg, 30), font_color(cell.bg, 40)]
     attrs = cell.attrs
     font << 1 if attrs.bold
     font << 3 if attrs.italic == 1
