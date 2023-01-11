@@ -11,7 +11,6 @@ class VTermTerminal
     @vterm = VTerm.new rows, cols
     @vterm.set_utf8 true
     @vterm.screen.reset true
-    @mutex = Mutex.new
     @monitor = Monitor.new
     @cond = @monitor.new_cond
     @needs_refresh = true
@@ -156,7 +155,6 @@ class VTermTerminal
     window_changed = false
     Signal.trap :WINCH do
       window_changed = true
-      $> << CLEAR_SCREEN
     end
     cnt = 0
     step = 0.25
@@ -164,9 +162,9 @@ class VTermTerminal
       cnt += step
       sleep step
       next unless window_changed || cnt > REFRESH_INTERVAL
+      $> << CLEAR_SCREEN if window_changed
       cnt = 0
       window_changed = false
-      $> << CLEAR_SCREEN if window_changed
       trigger_refresh
     end
   end
