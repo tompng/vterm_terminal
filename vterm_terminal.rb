@@ -78,7 +78,8 @@ class VTermTerminal
       data = pty_input.readpartial 1024
       break unless data
       @monitor.synchronize do
-        @vterm.write data
+        # avoid writing null byte to vterm
+        @vterm.write data.tr("\0", "\1")
         pty_output.write @vterm.read
         trigger_update
       end
