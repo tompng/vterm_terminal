@@ -173,6 +173,7 @@ class VTermTerminal
   def start(command)
     $> << CLEAR_SCREEN
     PTY.spawn command do |pty_input, pty_output|
+      pty_output.winsize = [@rows, @cols]
       terminate = -> {
         $> << "\e[#{@rows + HEADER_HEIGHT};#{@cols}H\r\n"
         exit
