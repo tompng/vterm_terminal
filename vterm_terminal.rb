@@ -6,11 +6,12 @@ require 'monitor'
 
 class VTermTerminal
   attr_accessor :activated
-  def initialize(command, rows, cols, offset_left)
+  def initialize(command, rows, cols, offset_left, true_cursor)
     @command = command
     @rows = rows
     @cols = cols
     @activated = true
+    @true_cursor = true_cursor
     @offset_left = offset_left
     @vterm = VTerm.new rows, cols
     @vterm.set_utf8 true
@@ -23,11 +24,16 @@ class VTermTerminal
     clear_screen_cache
   end
 
+  # TODO: use terminfo
+  HIDE_CURSOR = "\e[?25l"
+  SHOW_CURSOR = "\e[?12l\e[?25h"
+
   COLOR_ELEMENT_TABLE = [0, 95, 135, 175, 215, 255]
   COLOR_VALUE_INDEX = 256.times.map do |value|
     (0..5).min_by { (COLOR_ELEMENT_TABLE[_1] - value).abs }
   end
-  def font_color(color, base)
+
+  def self.font_color(color, base)
     return base + color.index if color.is_a? VTerm::ColorIndexed
     r = COLOR_VALUE_INDEX[color.red]
     g = COLOR_VALUE_INDEX[color.green]
@@ -35,7 +41,9 @@ class VTermTerminal
     [base + 8, 5, r * 36 + g * 6 + b + 16]
   end
 
-  def font_style(cell)
+  CURSOR_COLOR = [48, 5, 102]
+
+  def self.font_style(cell)
     font = [font_color(cell.fg, 30), font_color(cell.bg, 40)]
     attrs = cell.attrs
     font << 1 if attrs.bold
@@ -114,6 +122,7 @@ class VTermTerminal
   end
 
   def render(refresh)
+    @cursor_restore&.call
     window_rows, window_cols = STDOUT.winsize
     window_cols -= @offset_left
     return if window_cols <= 0
@@ -128,10 +137,11 @@ class VTermTerminal
     end
     next_screen = @rows.times.map do |row|
       @cols.times.map do |col|
-        cell = screen.cell_at(row, col)
-        [cell.char, font_style(cell)]
+        cell = screen.cell_at row, col
+        [cell.char, VTermTerminal.font_style(cell)]
       end
     end
+    next_screen[cursor_row - 1][cursor_col - 1][1] += CURSOR_COLOR unless @true_cursor
     output = [@rows, window_rows - HEADER_HEIGHT].min.times.map do |row|
       prev_row = @screen_cache[row]
       next_row = next_screen[row]
@@ -151,7 +161,10 @@ class VTermTerminal
       end
       ["\e[#{row + HEADER_HEIGHT + 1};#{@offset_left + 1}H", data]
     end
-    $> << output.join + "\e[#{[window_rows, cursor_row + HEADER_HEIGHT].min};#{@offset_left + [window_cols, cursor_col].min}H"
+    if @true_cursor
+      cursor = "\e[#{[window_rows, cursor_row + HEADER_HEIGHT].min};#{@offset_left + [window_cols, cursor_col].min}H"
+    end
+    $> << "#{output.join}#{cursor}"
     @screen_cache = next_screen
   end
 
@@ -182,7 +195,7 @@ class VTermTerminal
       @pty_output = pty_output
       pty_output.winsize = [@rows, @cols]
       terminate = -> {
-        $> << "\e[#{@rows + HEADER_HEIGHT};#{@cols}H\r\n"
+        $> << "\e[#{@rows + HEADER_HEIGHT};#{@cols}H\r\n" + SHOW_CURSOR
         exit
       }
       Thread.new do
@@ -212,16 +225,17 @@ else
   cols = (window_cols - num + 1) / num
 end
 commands << 'bash' if commands.empty?
-
-
+use_true_cursor = commands.size == 1
 vterms = commands.map.with_index do |command, index|
-  VTermTerminal.new(command, rows, cols, index * (cols + 1))
+  VTermTerminal.new command, rows, cols, index * (cols + 1), use_true_cursor
 end
 $> << VTermTerminal::CLEAR_SCREEN
 vterms.each do |vterm|
   Thread.new { vterm.start }
 end
+
 Thread.new do
+  $> << VTermTerminal::HIDE_CURSOR unless use_true_cursor
   STDIN.raw do
     current_tab = 0
     loop do
@@ -240,6 +254,7 @@ Thread.new do
       end
     end
   end
+  $> << VTermTerminal::SHOW_CURSOR
   exit
 end
 
