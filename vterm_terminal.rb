@@ -5,9 +5,13 @@ require 'monitor'
 # module Reline; require 'reline/unicode'; end TODO: calculate unicode charwidth
 
 class VTermTerminal
-  def initialize(rows, cols)
+  attr_accessor :activated
+  def initialize(command, rows, cols, offset_left)
+    @command = command
     @rows = rows
     @cols = cols
+    @activated = true
+    @offset_left = offset_left
     @vterm = VTerm.new rows, cols
     @vterm.set_utf8 true
     @vterm.screen.reset true
@@ -49,14 +53,8 @@ class VTermTerminal
     @screen_cache = @rows.times.map { [nil] * @cols }
   end
 
-  def stdin_to_pty(pty_output)
-    STDIN.raw do
-      loop do
-        data = STDIN.readpartial 1024
-        break unless data
-        pty_output.write data
-      end
-    end
+  def write_to_pty(data)
+    @pty_output.write data
   end
 
   def trigger_update
@@ -101,18 +99,27 @@ class VTermTerminal
     end
   end
 
+  def render_header
+    window_cols = STDOUT.winsize.last - @offset_left
+    return if window_cols <= 0
+    header = "#{@cols}x#{@rows} #{@command}"
+    header_width = [window_cols, @cols].min
+    if header.size < header_width
+      header << ' ' * (header_width - header.size)
+    else
+      header = header[0, header_width]
+    end
+    color_seq = @activated ? "\e[41;1;37m" : "\e[47;30m"
+    $> << "\e[1;#{@offset_left + 1}H#{color_seq}#{header}\e[m"
+  end
+
   def render(refresh)
     window_rows, window_cols = STDOUT.winsize
+    window_cols -= @offset_left
+    return if window_cols <= 0
     if refresh
       clear_screen_cache
-      header = "VTERM #{@cols}x#{@rows}"
-      header_width = [window_cols, @cols].min
-      if header.size < header_width
-        header << ' ' * (header_width - header.size)
-      else
-        header = header[0, header_width]
-      end
-      $> << "\e[H\e[41m\e[37m#{header}\e[m"
+      render_header
     end
     screen, cursor_row, cursor_col = @monitor.synchronize do
       @vterm.write "\e[6n"
@@ -142,9 +149,9 @@ class VTermTerminal
           "\e[#{font.compact.join(';')}m#{chars.map { _1 == '' ? ' ' : _1 }.join}\e[0m"
         end
       end
-      ["\e[#{row + HEADER_HEIGHT + 1}H", data]
+      ["\e[#{row + HEADER_HEIGHT + 1};#{@offset_left + 1}H", data]
     end
-    $><< output.join + "\e[#{[window_rows, cursor_row + HEADER_HEIGHT].min};#{[window_cols, cursor_col].min}H"
+    $> << output.join + "\e[#{[window_rows, cursor_row + HEADER_HEIGHT].min};#{@offset_left + [window_cols, cursor_col].min}H"
     @screen_cache = next_screen
   end
 
@@ -152,7 +159,7 @@ class VTermTerminal
   REFRESH_INTERVAL = 10
   CLEAR_SCREEN = "\e[H\e[2J"
 
-  def watch_winch
+  def self.watch_winch
     window_changed = false
     Signal.trap :WINCH do
       window_changed = true
@@ -166,25 +173,18 @@ class VTermTerminal
       $> << CLEAR_SCREEN if window_changed
       cnt = 0
       window_changed = false
-      trigger_refresh
+      yield
     end
   end
 
-  def start(command)
-    $> << CLEAR_SCREEN
-    PTY.spawn command do |pty_input, pty_output|
+  def start
+    PTY.spawn @command do |pty_input, pty_output|
+      @pty_output = pty_output
       pty_output.winsize = [@rows, @cols]
       terminate = -> {
         $> << "\e[#{@rows + HEADER_HEIGHT};#{@cols}H\r\n"
         exit
       }
-      Thread.new do
-        watch_winch
-      end
-      Thread.new do
-        stdin_to_pty(pty_output)
-        terminate.call
-      end
       Thread.new do
         pty_to_vterm(pty_input, pty_output)
         terminate.call
@@ -195,16 +195,54 @@ class VTermTerminal
 end
 
 if ARGV[0]&.match?(/help/)
-  puts "ARGV = [command] | [command, 'auto'] | [command, cols, rows]"
+  puts "ARGV = [*commands] | ['-s', '80x24', *commands]"
+  puts "To switch tab, press `option + number` (0 means all tab)"
   exit
 end
-command = ARGV[0] || 'bash'
-window_rows, window_cols = STDOUT.winsize
-rows = window_rows - VTermTerminal::HEADER_HEIGHT
-cols = window_cols
-if ARGV[1] =~ /\A(\d+)x(\d+)\z/
+if ARGV[0] == '-s'
+  raise 'invalid size' unless ARGV[1] =~ /\A(\d+)x(\d+)\z/
   cols = $1.to_i
   rows = $2.to_i
+  commands = ARGV[2..]
+else
+  window_rows, window_cols = STDOUT.winsize
+  commands = ARGV.dup
+  num = [commands.size, 1].max
+  rows = window_rows - VTermTerminal::HEADER_HEIGHT
+  cols = (window_cols - num + 1) / num
+end
+commands << 'bash' if commands.empty?
+
+
+vterms = commands.map.with_index do |command, index|
+  VTermTerminal.new(command, rows, cols, index * (cols + 1))
+end
+$> << VTermTerminal::CLEAR_SCREEN
+vterms.each do |vterm|
+  Thread.new { vterm.start }
+end
+Thread.new do
+  STDIN.raw do
+    current_tab = 0
+    loop do
+      data = STDIN.readpartial 1024
+      break unless data
+      if data =~ /\A\e(\d)\z/
+        current_tab = $1.to_i
+        vterms.each.with_index(1) do |vterm, tab|
+          vterm.activated = current_tab.zero? || current_tab == tab
+          vterm.render_header
+        end
+      else
+        vterms.each.with_index(1) do |vterm, tab|
+          vterm.write_to_pty data if current_tab.zero? || current_tab == tab
+        end
+      end
+    end
+  end
+  exit
 end
 
-VTermTerminal.new(rows, cols).start(command)
+VTermTerminal.watch_winch do
+  vterms.each(&:trigger_refresh)
+end
